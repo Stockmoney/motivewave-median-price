@@ -28,6 +28,7 @@ import median_price.core.Mode;
 import median_price.core.Period;
 import median_price.core.RthHours;
 import median_price.core.SessionClock;
+import median_price.core.SourcePick;
 import median_price.core.StraightLines;
 
 /**
@@ -55,7 +56,7 @@ import median_price.core.StraightLines;
 )
 public class MedianPrice extends Study {
 
-    static final String VERSION = "0.3.2";
+    static final String VERSION = "0.3.4";
 
     /** Plotted values: the main set, and the RTH set that "Show both" adds. */
     private enum Values { DAY, WEEK, MONTH, DAY_RTH, WEEK_RTH, MONTH_RTH }
@@ -201,26 +202,35 @@ public class MedianPrice extends Study {
         var resolved = RthHours.resolve(auto, symbol, s.getString(RTH_OPEN, "09:30"), s.getString(RTH_CLOSE, "16:00"));
         var clock = new SessionClock(SessionClock.NEW_YORK, resolved.hours());
 
+        // The source first: a day, week or month that opened before its first bar is only partly known, and the
+        // calculation leaves such a period blank (no line) instead of drawing a plausible but wrong median.
+        fine = chooseSource(ctx);
+        long dataStart = fine.size() > 0 ? fine.start(0) : Long.MAX_VALUE;
         var next = new ArrayList<Layer>();
         if (both) {
-            next.add(new Layer(new MedianCalc(clock, Mode.GLOBEX), new Values[]{Values.DAY, Values.WEEK, Values.MONTH}));
-            next.add(new Layer(new MedianCalc(clock, Mode.RTH), new Values[]{Values.DAY_RTH, Values.WEEK_RTH, Values.MONTH_RTH}));
+            next.add(new Layer(new MedianCalc(clock, Mode.GLOBEX, dataStart), new Values[]{Values.DAY, Values.WEEK, Values.MONTH}));
+            next.add(new Layer(new MedianCalc(clock, Mode.RTH, dataStart), new Values[]{Values.DAY_RTH, Values.WEEK_RTH, Values.MONTH_RTH}));
         } else {
-            next.add(new Layer(new MedianCalc(clock, mode), new Values[]{Values.DAY, Values.WEEK, Values.MONTH}));
+            next.add(new Layer(new MedianCalc(clock, mode, dataStart), new Values[]{Values.DAY, Values.WEEK, Values.MONTH}));
         }
         layers = next;
         lastLogged = "";
-        fine = chooseSource(ctx);
         AuditLog.log("SETUP", "v" + VERSION + " " + symbol + " mode=" + (both ? "GLOBEX+RTH (show both)" : mode)
                 + " line=" + (straightLine ? "straight" : "step") + " rth=" + resolved.hours()
                 + (resolved.usedFallback() ? " (typed hours not valid: equity hours used)" : "")
                 + " chart bars=" + ctx.getDataSeries().size() + " | range data: " + describe(fine, ctx));
     }
 
+    /** Which series the ranges are read from, for the journal. */
+    private String sourceText = "";
+
     /**
-     * The series the ranges are read from: the helper series when the platform provides it, otherwise the
-     * chart's own bars. The helper is only attached to an indicator that was created with its bar-size setting,
-     * so the setting is also written explicitly: an older indicator then gets it the next time the workspace loads.
+     * The series the ranges are read from. Two candidates: the helper series (5-minute bars, attached only to an
+     * indicator that was created with its bar-size setting - the setting is also written explicitly, so an older
+     * indicator gets it the next time the workspace loads) and the chart's own bars. The platform loads a different
+     * amount of history for each depending on the chart (see {@link SourcePick}), so the first one that reaches back
+     * to the start of the month is used; when neither does, the one that reaches back furthest, and the calculation
+     * leaves the periods it cannot know blank.
      */
     private Feed chooseSource(DataContext ctx) {
         var bs = getSettings().getBarSize(HELPER_BAR);
@@ -233,21 +243,40 @@ public class MedianPrice extends Study {
             AuditLog.log("ERROR", "helper series: " + e);
         }
         long interval = bs.getIntervalMillis();
-        if (helper != null && helper.size() > 0 && interval > 0) return new PlatformFeed(helper, interval);
-        return new PlatformFeed(ctx.getDataSeries(), 0);
+        DataSeries chart = ctx.getDataSeries();
+        PlatformFeed helperFeed = helper != null && helper.size() > 0 && interval > 0 ? new PlatformFeed(helper, interval) : null;
+        PlatformFeed chartFeed = chart != null && chart.size() > 0 ? new PlatformFeed(chart, 0) : null;
+        if (chartFeed == null) {
+            sourceText = helperFeed == null ? "none" : "helper series only";
+            return helperFeed != null ? helperFeed : new PlatformFeed(chart, 0);
+        }
+
+        var clock = new SessionClock(SessionClock.NEW_YORK, null);
+        long newest = chart.getStartTime(chart.size() - 1);
+        long need = clock.monthStart(SessionClock.monthKey(clock.tradeDate(newest)));
+        List<PlatformFeed> candidates = new ArrayList<>();
+        candidates.add(helperFeed);
+        candidates.add(chartFeed);
+        int pick = SourcePick.best(candidates, need);
+        sourceText = "month opened " + fmt(need) + "; helper " + (helperFeed == null ? "not attached" : helperFeed.size() + " bars from " + fmt(helperFeed.start(0)))
+                + "; chart " + chartFeed.size() + " bars from " + fmt(chartFeed.start(0)) + " -> using " + (pick == 0 ? "the helper series" : "the CHART bars");
+        return candidates.get(pick < 0 ? 1 : pick);
+    }
+
+    private static String fmt(long epochMillis) {
+        return java.time.Instant.ofEpochMilli(epochMillis).atZone(SessionClock.NEW_YORK).toLocalDateTime().withNano(0).toString();
     }
 
     /** What the ranges are read from, and whether it reaches back to the start of the month. */
     private String describe(Feed source, DataContext ctx) {
-        if (!(source instanceof PlatformFeed pf) || source.size() == 0) return "none";
-        boolean helper = pf.intervalMillis > 0;
+        if (source.size() == 0) return "none";
         var first = java.time.Instant.ofEpochMilli(source.start(0)).atZone(SessionClock.NEW_YORK).toLocalDateTime();
         var chart = ctx.getDataSeries();
         var now = java.time.Instant.ofEpochMilli(chart.getStartTime(chart.size() - 1)).atZone(SessionClock.NEW_YORK).toLocalDateTime();
         var monthStart = now.toLocalDate().withDayOfMonth(1).atStartOfDay().minusHours(6);       // the session of the 1st opens the evening before
-        String text = (helper ? "helper series (" + source.size() + " bars)" : "CHART bars (helper series not attached: re-add the indicator)")
-                + " from " + first;
-        if (first.isAfter(monthStart)) text += " - WARNING: the month began " + monthStart + ", week/month medians may be incomplete";
+        String text = sourceText + "; source starts " + first;
+        if (first.isAfter(monthStart)) text += " - WARNING: the data starts after the month began: the month (and the weeks and days that began before "
+                + first + ") are left BLANK, not guessed";
         return text;
     }
 
