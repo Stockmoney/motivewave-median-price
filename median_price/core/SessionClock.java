@@ -68,6 +68,25 @@ public final class SessionClock {
         return m.getYear() * 12L + m.getMonthValue();
     }
 
+    // ---------------------------------------------------------------- when a period begins
+    /** The Globex session of a trade date opens at 18:00 the evening before (Sunday evening for a Monday). */
+    public long dayStart(LocalDate tradeDate) {
+        return tradeDate.minusDays(1).atTime(GLOBEX_START_HOUR, 0).atZone(zone).toInstant().toEpochMilli();
+    }
+
+    /** Start of the week with this key (the epoch day of its Monday): Sunday 18:00. */
+    public long weekStart(long weekKey) {
+        return dayStart(LocalDate.ofEpochDay(weekKey));
+    }
+
+    /** Start of the month with this key: the evening before its first Monday - Friday date. */
+    public long monthStart(long monthKey) {
+        long year = Math.floorDiv(monthKey - 1, 12);
+        LocalDate d = LocalDate.of((int) year, (int) (monthKey - year * 12), 1);
+        while (d.getDayOfWeek() == DayOfWeek.SATURDAY || d.getDayOfWeek() == DayOfWeek.SUNDAY) d = d.plusDays(1);
+        return dayStart(d);
+    }
+
     /** ISO week number, only used by tests to cross-check weekKey. */
     static int isoWeek(LocalDate date) { return date.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR); }
 }

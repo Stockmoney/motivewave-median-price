@@ -55,9 +55,34 @@ public final class MedianCalc {
     private final Range gDay = new Range(), gWeek = new Range(), gMonth = new Range();
     private final Range rDay = new Range(), rWeek = new Range(), rMonth = new Range();
 
+    /** Data may begin this long after a period opens (a missing first bar or two) and the period still counts as covered. */
+    static final long SLACK_MS = 2 * 60 * 60 * 1000L;
+
+    private final long dataStart;
+
     public MedianCalc(SessionClock clock, Mode mode) {
+        this(clock, mode, Long.MIN_VALUE);
+    }
+
+    /**
+     * @param dataStart start time of the first bar the calculation will be fed. A day, week or month that opened
+     *                  BEFORE it is only partly known, so its median would be wrong; it is reported as NaN (no line)
+     *                  instead of a plausible but false value. Long.MIN_VALUE = no check.
+     */
+    public MedianCalc(SessionClock clock, Mode mode, long dataStart) {
         this.clock = clock;
         this.mode = mode;
+        this.dataStart = dataStart;
+    }
+
+    private boolean covered(long periodStart) {
+        return dataStart == Long.MIN_VALUE || dataStart <= periodStart + SLACK_MS;
+    }
+
+    private double known(Range r, java.util.function.LongUnaryOperator start) {
+        double mid = r.mid();
+        if (Double.isNaN(mid)) return mid;                      // nothing seen yet: no key to look up either
+        return covered(start.applyAsLong(r.key)) ? mid : Double.NaN;
     }
 
     public Mids feed(long epochMillis, double high, double low) {
@@ -75,12 +100,13 @@ public final class MedianCalc {
             rMonth.add(SessionClock.monthKey(rd), high, low);
         }
 
+        double gd = known(gDay, k -> clock.dayStart(LocalDate.ofEpochDay(k)));
+        double gw = known(gWeek, clock::weekStart), gm = known(gMonth, clock::monthStart);
         return switch (mode) {
-            case GLOBEX -> new Mids(gDay.mid(), gWeek.mid(), gMonth.mid(),
-                    gDay.run(false), gWeek.run(false), gMonth.run(false));
-            case RTH -> new Mids(rDay.mid(), rWeek.mid(), rMonth.mid(),
-                    rDay.run(true), rWeek.run(true), rMonth.run(true));
-            case MIX -> new Mids(rth ? rDay.mid() : gDay.mid(), gWeek.mid(), gMonth.mid(),
+            case GLOBEX -> new Mids(gd, gw, gm, gDay.run(false), gWeek.run(false), gMonth.run(false));
+            case RTH -> new Mids(known(rDay, k -> clock.dayStart(LocalDate.ofEpochDay(k))), known(rWeek, clock::weekStart),
+                    known(rMonth, clock::monthStart), rDay.run(true), rWeek.run(true), rMonth.run(true));
+            case MIX -> new Mids(rth ? known(rDay, k -> clock.dayStart(LocalDate.ofEpochDay(k))) : gd, gw, gm,
                     rth ? rDay.run(true) : gDay.run(false), gWeek.run(false), gMonth.run(false));
         };
     }
