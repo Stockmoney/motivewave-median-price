@@ -58,6 +58,8 @@ You can check the "no orders" claim yourself: `javap -v` on the compiled classes
 
 ## Changelog
 
+**0.3.2** — fix: on a short chart (for example 5 minutes) the week and month medians were computed from only a day or two of bars. The indicator now asks MotiveWave for history from the start of the month, so they are right on every chart. Also fixed a rare error while a chart reloads its history.
+
 **0.3.0** — first public release. Week and month ranges from a helper series (right values on a short chart); session modes Globex / US RTH / Mix, *Show both*, *Straight line*; menu folder *Alex Indicators*.
 
 ## Disclaimer
