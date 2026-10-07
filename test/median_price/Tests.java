@@ -14,6 +14,7 @@ import median_price.core.Mode;
 import median_price.core.Period;
 import median_price.core.RthHours;
 import median_price.core.SessionClock;
+import median_price.core.SourcePick;
 import median_price.core.StraightLines;
 
 /** Plain-JVM tests (no MotiveWave, no framework); build.sh runs them on every build. */
@@ -30,6 +31,8 @@ public final class Tests {
         mix();
         history();
         mapped();
+        coverage();
+        sourcePick();
         closedOnly();
         runs();
         straight();
@@ -279,6 +282,87 @@ public final class Tests {
 
         month.reset(new MedianCalc(clock(), Mode.GLOBEX));
         eq("reset starts again", 0, month.fedCount());
+    }
+
+    // ------------------------------------------------------------------ a period the data does not reach back to
+    private static void coverage() {
+        var c = clock();
+        eq("a Thursday 1st: the month opens the evening before", ny(2026, 9, 30, 18, 0), c.monthStart(SessionClock.monthKey(LocalDate.of(2026, 10, 1))));
+        eq("a Sunday 1st: the month opens that Sunday evening", ny(2026, 11, 1, 18, 0), c.monthStart(SessionClock.monthKey(LocalDate.of(2026, 11, 15))));
+        eq("a Tuesday 1st", ny(2026, 11, 30, 18, 0), c.monthStart(SessionClock.monthKey(LocalDate.of(2026, 12, 20))));
+        eq("January (year turns)", ny(2026, 12, 31, 18, 0), c.monthStart(SessionClock.monthKey(LocalDate.of(2027, 1, 20))));
+        eq("the week opens on Sunday evening", ny(2026, 10, 4, 18, 0), c.weekStart(SessionClock.weekKey(LocalDate.of(2026, 10, 7))));
+        eq("a Tuesday opens on Monday evening", ny(2026, 10, 6, 18, 0), c.dayStart(LocalDate.of(2026, 10, 7)));
+
+        // the live bug of 7 Oct 2026: a 1-minute chart whose helper data began on 6 Oct at 12:45
+        var shortData = new MedianCalc(c, Mode.GLOBEX, ny(2026, 10, 6, 12, 45));
+        var m = shortData.feed(ny(2026, 10, 6, 13, 0), 31400, 31300);
+        check("month is blank: the data does not reach its start", Double.isNaN(m.month()));
+        check("week is blank", Double.isNaN(m.week()));
+        check("the day that opened before the data is blank too", Double.isNaN(m.day()));
+        m = shortData.feed(ny(2026, 10, 7, 10, 0), 31390, 31350);
+        check("still blank the next day: month and week", Double.isNaN(m.month()) && Double.isNaN(m.week()));
+        near("a day that opened after the data began is known", (31390 + 31350) / 2.0, m.day());
+
+        // data that does reach back
+        var full = new MedianCalc(c, Mode.GLOBEX, ny(2026, 9, 24, 0, 0));
+        m = full.feed(ny(2026, 10, 1, 10, 0), 120, 100);
+        near("month known", 110, m.month());
+        near("week known", 110, m.week());
+        m = full.feed(ny(2026, 10, 7, 10, 0), 130, 90);
+        near("month grows with the data", 110, m.month());
+        near("a new week starts clean", 110, m.week());
+
+        // a missing first bar or two is tolerated, hours of missing data are not
+        near("2 hours late: still covered", 105, new MedianCalc(c, Mode.GLOBEX, ny(2026, 9, 30, 20, 0)).feed(ny(2026, 10, 1, 10, 0), 110, 100).month());
+        check("3 hours late: blank", Double.isNaN(new MedianCalc(c, Mode.GLOBEX, ny(2026, 9, 30, 21, 0)).feed(ny(2026, 10, 1, 10, 0), 110, 100).month()));
+
+        // no check at all by default; RTH and Mix before the first regular-hours bar must not fail
+        near("default constructor: no check", 105, new MedianCalc(c, Mode.GLOBEX).feed(ny(2026, 10, 7, 10, 0), 110, 100).month());
+        var rth = new MedianCalc(c, Mode.RTH, ny(2026, 9, 24, 0, 0));
+        check("RTH before regular hours: nothing, no error", Double.isNaN(rth.feed(ny(2026, 10, 7, 8, 0), 110, 100).month()));
+        near("RTH inside regular hours", 105, rth.feed(ny(2026, 10, 7, 10, 0), 110, 100).month());
+        var rthShort = new MedianCalc(c, Mode.RTH, ny(2026, 10, 6, 12, 45));
+        check("RTH with short data: month blank", Double.isNaN(rthShort.feed(ny(2026, 10, 7, 10, 0), 110, 100).month()));
+        var mix = new MedianCalc(c, Mode.MIX, ny(2026, 10, 6, 12, 45));
+        var mm = mix.feed(ny(2026, 10, 7, 10, 0), 110, 100);
+        check("Mix with short data: week and month blank", Double.isNaN(mm.month()) && Double.isNaN(mm.week()));
+        near("Mix with short data: today's RTH day known", 105, mm.day());
+
+        // a blank period in a straight-line display is skipped, not drawn
+        var sl = new StraightLines();
+        var written = new java.util.ArrayList<String>();
+        sl.onClosedBar(0, shortData.feed(ny(2026, 10, 7, 11, 0), 31390, 31350), (i, p, v) -> written.add(p + "@" + i));
+        check("straight line: only the known day is written", written.equals(java.util.List.of("DAY@0")));
+    }
+
+    // ------------------------------------------------------------------ which series the month is read from
+    private static FineFeed startingAt(long start) {
+        var f = new FineFeed();
+        f.add(start, 5, 100, 90, true);
+        return f;
+    }
+
+    private static void sourcePick() {
+        long month = ny(2026, 9, 30, 18, 0);                                // the October session opens here
+        var helperLong = startingAt(ny(2026, 9, 24, 0, 0));
+        var helperShort = startingAt(ny(2026, 10, 6, 12, 45));
+        var chartLong = startingAt(ny(2026, 9, 24, 0, 0));
+        var chartShort = startingAt(ny(2026, 10, 6, 9, 0));
+        var empty = new FineFeed();
+
+        eq("both reach back: the preferred (first) one", 0, SourcePick.best(java.util.List.of(helperLong, chartLong), month));
+        eq("the live 1-minute case: short helper, long chart bars -> the chart", 1, SourcePick.best(java.util.List.of(helperShort, chartLong), month));
+        eq("the live 5-minute case: long helper -> the helper", 0, SourcePick.best(java.util.List.of(helperLong, chartShort), month));
+        eq("neither reaches: the one that reaches back furthest", 1, SourcePick.best(java.util.List.of(helperShort, chartShort), month));
+        eq("... the furthest wins whatever the order", 1, SourcePick.best(java.util.List.of(chartShort, helperLong.size() > 0 ? startingAt(ny(2026, 10, 1, 0, 0)) : chartShort), month));
+        eq("a missing helper (null): the chart", 1, SourcePick.best(java.util.Arrays.asList(null, chartLong), month));
+        eq("an empty helper is skipped", 1, SourcePick.best(java.util.List.of(empty, chartLong), month));
+        eq("nothing usable: -1", -1, SourcePick.best(java.util.List.of(empty), month));
+        eq("no candidates: -1", -1, SourcePick.best(java.util.List.<Feed>of(), month));
+        eq("the 2-hour slack applies here too", 0, SourcePick.best(java.util.List.of(startingAt(ny(2026, 9, 30, 20, 0)), chartLong), month));
+        eq("3 hours late does not", 1, SourcePick.best(java.util.List.of(startingAt(ny(2026, 9, 30, 21, 0)), chartLong), month));
+        check("covers() and the calculation agree on the slack", SourcePick.covers(month + 2 * 3600_000L, month) && !SourcePick.covers(month + 2 * 3600_000L + 1, month));
     }
 
     // ------------------------------------------------------------------ closed bars only
