@@ -23,7 +23,7 @@ Three lines on your chart: the **median price — (high + low) / 2 — of the cu
 - **Show both**: Globex and RTH lines side by side (the RTH set is dashed, with its own colors).
 - **Straight line** (optional): each segment is drawn flat at its latest value instead of as steps.
 - Times are taken in the exchange's time zone (America/New_York), so your own time zone and daylight saving never matter.
-- **Correct on a short chart.** Week and month ranges are read from a finer helper series (5-minute bars by default, setting *Range data bar size*) that MotiveWave loads for the whole month, so the values are right even when the chart itself shows only a few days.
+- **Correct on a short chart.** Week and month ranges are read from a finer helper series (5-minute bars by default, setting *Range data bar size*) that MotiveWave loads for the whole month, so the values are right even when the chart itself shows only a few days. MotiveWave does not load the same amount of history on every chart, so the indicator checks which data (the helper series or the chart's own bars) really reaches back to the start of the month and uses that one. If no data does, the week or month line is left **blank** instead of showing a value computed from part of the period.
 
 The gear icon in the chart legend opens a small panel with the session, *Show both*, *Straight line* and the line colors; *All Settings* opens everything.
 
@@ -57,6 +57,10 @@ Different locations: `MW_SDK=/path/to/mwave_sdk.jar MW_EXT=/path/to/extensions b
 You can check the "no orders" claim yourself: `javap -v` on the compiled classes shows no reference to `order_mgmt` or `OrderContext`.
 
 ## Changelog
+
+**0.3.4** — fix: on some charts (for example 1 minute and 15 minutes) MotiveWave gave the helper series only a day or two of history, and the week and month medians were wrong. The indicator now picks the data source that actually reaches back to the start of the month (the helper series or the chart's own bars). Checked on 1m, 5m, 15m, 1h, 4h, 1d, 1w and 1M: the same values everywhere.
+
+**0.3.3** — a day, week or month that began before the first available bar is no longer drawn with a value computed from part of it: the line is left blank. A missing line is safer than a plausible but wrong one.
 
 **0.3.2** — fix: on a short chart (for example 5 minutes) the week and month medians were computed from only a day or two of bars. The indicator now asks MotiveWave for history from the start of the month, so they are right on every chart. Also fixed a rare error while a chart reloads its history.
 
