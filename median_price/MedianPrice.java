@@ -55,7 +55,7 @@ import median_price.core.StraightLines;
 )
 public class MedianPrice extends Study {
 
-    static final String VERSION = "0.3.0";
+    static final String VERSION = "0.3.2";
 
     /** Plotted values: the main set, and the RTH set that "Show both" adds. */
     private enum Values { DAY, WEEK, MONTH, DAY_RTH, WEEK_RTH, MONTH_RTH }
@@ -177,8 +177,20 @@ public class MedianPrice extends Study {
     }
 
     // ==================== calculation ====================
+    /**
+     * The platform loads history for a chart only as far back as the chart needs it (a 5-minute chart shows a day or
+     * two), and the helper series then reaches no further: the week and month medians were computed from a day or two
+     * of bars (journal 7 Oct 2026 21:28: month = week = 31380.38, "helper series (331 bars) from 2026-10-06").
+     * Asking for data from a week before the start of the month makes the platform load all of it.
+     */
     @Override
-    protected void precalculate(DataContext ctx) {
+    public Long getMinStartTime(DataContext ctx) {
+        return java.time.ZonedDateTime.now(SessionClock.NEW_YORK).toLocalDate().withDayOfMonth(1)
+                .atStartOfDay(SessionClock.NEW_YORK).minusDays(7).toInstant().toEpochMilli();
+    }
+
+    @Override
+    protected synchronized void precalculate(DataContext ctx) {
         // a full recalculation (first load, new settings, new data) always starts from the first bar
         Settings s = getSettings();
         Mode mode = parseMode(s.getString(SESSION, Mode.GLOBEX.name()));
@@ -240,7 +252,10 @@ public class MedianPrice extends Study {
     }
 
     @Override
-    protected void calculate(int index, DataContext ctx) {
+    protected synchronized void calculate(int index, DataContext ctx) {
+        // synchronized together with precalculate(): while a chart (re)loads its history the platform calls both from
+        // different threads within milliseconds; precalculate() replaces the layers and clears their lists, and a
+        // calculate() running through them read a half-cleared list (NullPointerException on 7 Oct 2026, 20:02:38).
         DataSeries bars = ctx.getDataSeries();
         if (layers.isEmpty() || fine == null) precalculate(ctx);
         boolean complete = bars.isBarComplete(index);
@@ -251,6 +266,7 @@ public class MedianPrice extends Study {
         for (Layer layer : layers) {
             for (int j = layer.chartMids.size(); j <= lastClosed; j++) {
                 var mids = layer.series.at(fine, bars.getEndTime(j));
+                if (mids == null) mids = ClosedBarSeries.EMPTY;      // never happens with the lock above; costs nothing
                 layer.chartMids.add(mids);
                 if (straightLine) {
                     // the tracker re-writes the earlier bars of a segment when its value moves
